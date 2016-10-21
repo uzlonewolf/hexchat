@@ -898,7 +898,8 @@ load_default_config(void)
 
 
 	/* private variables */
-	prefs.local_ip = 0xffffffff;
+	prefs.local_ip[0] = '\0';
+	prefs.dcc_ip[0] = '\0';
 
 	sp = strchr (prefs.hex_irc_user_name, ' ');
 	if (sp)

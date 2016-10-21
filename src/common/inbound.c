@@ -1418,8 +1418,15 @@ inbound_uback (server *serv, const message_tags_data *tags_data)
 void
 inbound_foundip (session *sess, char *ip, const message_tags_data *tags_data)
 {
-	struct hostent *HostAddr;
+	//struct hostent *HostAddr;
 
+	/*
+	safe_strcpy (prefs.dcc_ip, ip, INET6_ADDRSTRLEN);
+	EMIT_SIGNAL_TIMESTAMP (XP_TE_FOUNDIP, sess->server->server_session,
+	                       prefs.dcc_ip,
+	                       NULL, NULL, NULL, 0, tags_data->timestamp);
+	*/
+	/*
 	HostAddr = gethostbyname (ip);
 	if (HostAddr)
 	{
@@ -1428,6 +1435,7 @@ inbound_foundip (session *sess, char *ip, const message_tags_data *tags_data)
 									  inet_ntoa (*((struct in_addr *) HostAddr->h_addr)),
 									  NULL, NULL, NULL, 0, tags_data->timestamp);
 	}
+	*/
 }
 
 void

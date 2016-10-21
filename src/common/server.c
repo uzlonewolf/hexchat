@@ -863,7 +863,8 @@ server_read_child (GIOChannel *source, GIOCondition condition, server *serv)
 		break;
 	case '5':						  /* prefs ip discovered */
 		waitline2 (source, tbuf, sizeof tbuf);
-		prefs.local_ip = inet_addr (tbuf);
+		//prefs.local_ip = inet_addr (tbuf);
+		safe_strcpy (prefs.local_ip, tbuf, INET6_ADDRSTRLEN);
 		break;
 	case '7':						  /* gethostbyname (prefs.hex_net_bind_host) failed */
 		sprintf (outbuf,

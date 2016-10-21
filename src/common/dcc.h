@@ -43,12 +43,21 @@ enum dcc_type {
 
 #define CPS_AVG_WINDOW 10
 
+/*
+struct dcc_addr
+{
+  struct addrinfo addr;
+};
+*/
+
 struct DCC
 {
 	struct server *serv;
 	struct dcc_chat *dccchat;
 	struct proxy_state *proxy;
-	guint32 addr;					/* the 32bit IP number, host byte order */
+	struct addrinfo *addr;			/* changed to struct for IPv6 support */
+	struct addrinfo *first_addr;    /* getaddrinfo() returns a list, not just a single address */
+	int last_addr_af;               /* may use this to loop through the address families */
 	int fp;							/* file pointer */
 	int sok;
 	int iotag;						/* reading io tag */

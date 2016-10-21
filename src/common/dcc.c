@@ -42,8 +42,11 @@
 #ifdef WIN32
 #include <windows.h>
 #include <io.h>
+//#include <Ws2ipdef.h>
+//#include <WINSOCK.H>
 #else
 #include <unistd.h>
+//#include <netinet/in.h>
 #endif
 
 #include "hexchat.h"
@@ -215,6 +218,30 @@ dcc_remove_from_sum (struct DCC *dcc)
 		dcc_getcpssum -= dcc->cps;
 }
 
+char *
+dcc_get_dcc_ip (struct addrinfo *addr)
+{
+	static char out[INET6_ADDRSTRLEN];
+	struct sockaddr_in *addr4;
+
+	out[0] = '\0';
+
+	if (!addr)
+		return out;
+
+	if( addr->ai_family == AF_INET )
+	{
+		addr4 = (struct sockaddr_in *) addr->ai_addr;
+		sprintf (out, "%u", addr4->sin_addr.s_addr);
+	}
+	else if( addr->ai_family == AF_INET6 )
+	{
+		safe_strcpy( out, net_ip (addr), INET6_ADDRSTRLEN );
+	}
+
+	return out;
+}
+
 gboolean
 is_dcc (struct DCC *dcc)
 {
@@ -339,31 +366,53 @@ static int
 dcc_connect_sok (struct DCC *dcc)
 {
 	int sok;
-	struct sockaddr_in addr;
+	struct sockaddr_in *addr;
+	struct sockaddr_in6 *addr6;
 
-	sok = socket (AF_INET, SOCK_STREAM, 0);
+	if (!dcc->addr || !dcc->addr->ai_addr)
+		return -1;
+
+	sok = socket (dcc->addr->ai_family, SOCK_STREAM, 0);
 	if (sok == -1)
 		return -1;
 
-	memset (&addr, 0, sizeof (addr));
-	addr.sin_family = AF_INET;
+	//memset (&addr, 0, sizeof (addr));
+	//addr.sin_family = AF_INET;
 	if (DCC_USE_PROXY ())
 	{
-		if (!dcc_lookup_proxy (prefs.hex_net_proxy_host, &addr))
+		if( dcc->addr->ai_family != AF_INET )
+			return -1; /* FIXME uh oh, proxies do not support v6 yet! */
+
+		if (!dcc_lookup_proxy (prefs.hex_net_proxy_host, (struct sockaddr_in *) dcc->addr->ai_addr))
 		{
 			closesocket (sok);
 			return -1;
 		}
-		addr.sin_port = htons (prefs.hex_net_proxy_port);
+		addr = (struct sockaddr_in *) dcc->addr->ai_addr;
+		addr->sin_port = htons (prefs.hex_net_proxy_port);
 	}
 	else
 	{
-		addr.sin_port = htons (dcc->port);
-		addr.sin_addr.s_addr = htonl (dcc->addr);
+		if( dcc->addr->ai_family == AF_INET )
+		{
+			addr = (struct sockaddr_in *) dcc->addr->ai_addr;
+			addr->sin_port = htons (dcc->port);
+			//addr->sin_addr.s_addr = htonl (dcc->addr);
+		}
+		else if( dcc->addr->ai_family == AF_INET6 )
+		{
+			addr6 = (struct sockaddr_in6 *) dcc->addr->ai_addr;
+			addr6->sin6_port = htons (dcc->port);
+			//addr.sin6_addr.s6_addr = htonl (dcc->addr);
+		}
+		else
+		{
+			return -1;
+		}
 	}
 
 	set_nonblocking (sok);
-	connect (sok, (struct sockaddr *) &addr, sizeof (addr));
+	connect (sok, dcc->addr->ai_addr, dcc->addr->ai_addrlen);
 
 	return sok;
 }
@@ -421,6 +470,13 @@ dcc_close (struct DCC *dcc, enum dcc_state dccstat, int destroy)
 	{
 		dcc_list = g_slist_remove (dcc_list, dcc);
 		fe_dcc_remove (dcc);
+
+		if (dcc->addr)
+		{
+			freeaddrinfo (dcc->addr);
+			dcc->addr = NULL;
+		}
+
 		g_free (dcc->proxy);
 		g_free (dcc->file);
 		g_free (dcc->destfile);
@@ -530,7 +586,7 @@ dcc_chat_line (struct DCC *dcc, char *line)
 	sprintf (portbuf, "%d", dcc->port);
 
 	word[0] = "DCC Chat Text";
-	word[1] = net_ip (dcc->addr);
+	word[1] = net_ip (dcc->addr); /* send the remote IP to any/all plug-ins */
 	word[2] = portbuf;
 	word[3] = dcc->nick;
 	word[4] = line;
@@ -598,6 +654,7 @@ dcc_read_chat (GIOChannel *source, GIOCondition condition, struct DCC *dcc)
 					return TRUE;
 			}
 			sprintf (portbuf, "%d", dcc->port);
+			/* send the remote IP to any/all plug-ins in the "connection closed" message */
 			EMIT_SIGNAL (XP_TE_DCCCHATF, dcc->serv->front_session, dcc->nick,
 							 net_ip (dcc->addr), portbuf,
 							 errorstring ((len < 0) ? sock_error () : 0), 0);
@@ -807,15 +864,24 @@ dcc_did_connect (GIOChannel *source, GIOCondition condition, struct DCC *dcc)
 	}
 
 #else
+	/*
 	struct sockaddr_in addr;
 
 	memset (&addr, 0, sizeof (addr));
 	addr.sin_port = htons (dcc->port);
 	addr.sin_family = AF_INET;
 	addr.sin_addr.s_addr = htonl (dcc->addr);
+	*/
+
+	if( dcc->addr->ai_addr == NULL )
+	{
+		dcc->dccstat = STAT_FAILED;
+		fe_dcc_update (dcc);
+		return FALSE;
+	}
 
 	/* check if it's already connected; This always fails on winXP */
-	if (connect (dcc->sok, (struct sockaddr *) &addr, sizeof (addr)) != 0)
+	if (connect (dcc->sok, dcc->addr->ai_addr, dcc->addr->ai_addrlen) != 0)
 	{
 		er = sock_error ();
 		if (er != EISCONN)
@@ -998,6 +1064,16 @@ static gboolean
 dcc_socks_proxy_traverse (GIOChannel *source, GIOCondition condition, struct DCC *dcc)
 {
 	struct proxy_state *proxy = dcc->proxy;
+	struct sockaddr_in *addr;
+
+	if( !dcc->addr || !dcc->addr->ai_addr || dcc->addr->ai_family != AF_INET ) /* FIXME no v6 support yet */
+	{
+		dcc->dccstat = STAT_FAILED;
+		fe_dcc_update (dcc);
+		return TRUE;
+	}
+
+	addr = (struct sockaddr_in *) dcc->addr->ai_addr;
 
 	if (proxy->phase == 0)
 	{
@@ -1005,7 +1081,7 @@ dcc_socks_proxy_traverse (GIOChannel *source, GIOCondition condition, struct DCC
 		sc.version = 4;
 		sc.type = 1;
 		sc.port = htons (dcc->port);
-		sc.address = htonl (dcc->addr);
+		sc.address = htonl (addr->sin_addr.s_addr);
 		strncpy (sc.username, prefs.hex_irc_user_name, 9);
 		memcpy (proxy->buffer, &sc, sizeof (sc));
 		proxy->buffersize = 8 + strlen (sc.username) + 1;
@@ -1178,14 +1254,25 @@ dcc_socks5_proxy_traverse (GIOChannel *source, GIOCondition condition, struct DC
 
 	if (proxy->phase == 5)
 	{
+		struct sockaddr_in *addr;
+
+		if( !dcc->addr || !dcc->addr->ai_addr || dcc->addr->ai_family != AF_INET ) /* FIXME no v6 support yet */
+		{
+			dcc->dccstat = STAT_FAILED;
+			fe_dcc_update (dcc);
+			return TRUE;
+		}
+
+		addr = (struct sockaddr_in *) dcc->addr->ai_addr;
+
 		proxy->buffer[0] = 5;	/* version (socks 5) */
 		proxy->buffer[1] = 1;	/* command (connect) */
 		proxy->buffer[2] = 0;	/* reserved */
 		proxy->buffer[3] = 1;	/* address type (IPv4) */
-		proxy->buffer[4] = (dcc->addr >> 24) & 0xFF;	/* IP address */
-		proxy->buffer[5] = (dcc->addr >> 16) & 0xFF;
-		proxy->buffer[6] = (dcc->addr >> 8) & 0xFF;
-		proxy->buffer[7] = (dcc->addr & 0xFF);
+		proxy->buffer[4] = (addr->sin_addr.s_addr >> 24) & 0xFF;	/* IP address */
+		proxy->buffer[5] = (addr->sin_addr.s_addr >> 16) & 0xFF;
+		proxy->buffer[6] = (addr->sin_addr.s_addr >> 8) & 0xFF;
+		proxy->buffer[7] = (addr->sin_addr.s_addr & 0xFF);
 		proxy->buffer[8] = (dcc->port >> 8) & 0xFF;		/* port */
 		proxy->buffer[9] = (dcc->port & 0xFF);
 		proxy->buffersize = 10;
@@ -1386,12 +1473,12 @@ dcc_connect (struct DCC *dcc)
 		/* possible problems with filenames containing spaces? */
 		if (dcc->type == TYPE_RECV)
 			g_snprintf (tbuf, sizeof (tbuf), strchr (dcc->file, ' ') ?
-					"DCC SEND \"%s\" %u %d %" G_GUINT64_FORMAT " %d" :
-					"DCC SEND %s %u %d %" G_GUINT64_FORMAT " %d", dcc->file,
-					dcc->addr, dcc->port, dcc->size, dcc->pasvid);
+					"DCC SEND \"%s\" %s %d %" G_GUINT64_FORMAT " %d" :
+					"DCC SEND %s %s %d %" G_GUINT64_FORMAT " %d", dcc->file,
+			            dcc_get_dcc_ip (dcc->addr), dcc->port, dcc->size, dcc->pasvid);
 		else
-			g_snprintf (tbuf, sizeof (tbuf), "DCC CHAT chat %u %d %d",
-				dcc->addr, dcc->port, dcc->pasvid);
+			g_snprintf (tbuf, sizeof (tbuf), "DCC CHAT chat %s %d %d",
+			            dcc_get_dcc_ip (dcc->addr), dcc->port, dcc->pasvid);
 		dcc->serv->p_ctcp (dcc->serv, dcc->nick, tbuf);
 	}
 	else
@@ -1562,12 +1649,12 @@ static gboolean
 dcc_accept (GIOChannel *source, GIOCondition condition, struct DCC *dcc)
 {
 	char host[128];
-	struct sockaddr_in CAddr;
+	//struct sockaddr_in CAddr;
 	int sok;
-	socklen_t len;
+	//socklen_t len;
 
-	len = sizeof (CAddr);
-	sok = accept (dcc->sok, (struct sockaddr *) &CAddr, &len);
+	//len = dcc->addr.ai_addrlen;
+	sok = accept (dcc->sok, dcc->addr->ai_addr, &dcc->addr->ai_addrlen);
 	fe_input_remove (dcc->iotag);
 	dcc->iotag = 0;
 	closesocket (dcc->sok);
@@ -1579,7 +1666,7 @@ dcc_accept (GIOChannel *source, GIOCondition condition, struct DCC *dcc)
 	}
 	set_nonblocking (sok);
 	dcc->sok = sok;
-	dcc->addr = ntohl (CAddr.sin_addr.s_addr);
+	//dcc->addr = ntohl (CAddr.sin_addr.s_addr);
 
 	if (dcc->pasvid)
 		return dcc_connect_finished (NULL, 0, dcc);
@@ -1620,9 +1707,10 @@ dcc_accept (GIOChannel *source, GIOCondition condition, struct DCC *dcc)
 guint32
 dcc_get_my_address (void)	/* the address we'll tell the other person */
 {
-	struct hostent *dns_query;
+	//struct hostent *dns_query;
 	guint32 addr = 0;
 
+	/*
 	if (prefs.hex_dcc_ip_from_server && prefs.dcc_ip)
 		addr = prefs.dcc_ip;
 	else if (prefs.hex_dcc_ip[0])
@@ -1633,11 +1721,11 @@ dcc_get_my_address (void)	/* the address we'll tell the other person */
 	       dns_query->h_length == 4 &&
 	       dns_query->h_addr_list[0] != NULL)
 		{
-			/*we're offered at least one IPv4 address: we take the first*/
-			addr = *((guint32*) dns_query->h_addr_list[0]);
+	*/			/*we're offered at least one IPv4 address: we take the first*/
+	/*			addr = *((guint32*) dns_query->h_addr_list[0]);
 		}
 	}
-
+	*/
 	return addr;
 }
 
@@ -1645,32 +1733,49 @@ static int
 dcc_listen_init (struct DCC *dcc, session *sess)
 {
 	guint32 my_addr;
-	struct sockaddr_in SAddr;
+	struct sockaddr_in6 SAddr;
 	int i, bindretval = -1;
 	socklen_t len;
 
-	dcc->sok = socket (AF_INET, SOCK_STREAM, 0);
+	/* FIXME / errata
+	   Win XP can't use v6-mapped-v4 addresses, so we must decide before we bind()
+	   v4/v6 auto-detection *ONLY* works when initiating a connection, we must decide which to use before sending an offer
+	   We should probably make a pref. setting for prefer4/prefer6/preferServer/sendBoth
+	*/
+
+	dcc->sok = -1;
+	return FALSE;
+
+
+	//struct addrinfo *ai, hints = { .ai_flags = AI_PASSIVE|AI_ADDRCONFIG|AI_V4MAPPED, .ai_family = AF_INET6, .ai_socktype = SOCK_STREAM, .ai_protocol = IPPROTO_TCP };
+	//getaddrinfo(0, NULL, &hints, &ai);
+
+	dcc->sok = socket (AF_INET6, SOCK_STREAM, 0);
 	if (dcc->sok == -1)
 		return FALSE;
 
-	memset (&SAddr, 0, sizeof (struct sockaddr_in));
+	memset (&SAddr, 0, sizeof (struct sockaddr_in6));
 
-	len = sizeof (SAddr);
-	getsockname (dcc->serv->sok, (struct sockaddr *) &SAddr, &len);
+	//len = sizeof (SAddr);
+	//getsockname (dcc->serv->sok, (struct sockaddr *) &SAddr, &len);
 
-	SAddr.sin_family = AF_INET;
+	//SAddr.sin_family = AF_INET6;
 
 	/*if local_ip is specified use that*/
+	/*
 	if (prefs.local_ip != 0xffffffff)
 	{
 		my_addr = prefs.local_ip;
 		SAddr.sin_addr.s_addr = prefs.local_ip;
 	}
-	/*otherwise use the default*/
+	*/ /*otherwise use the default*/
+	/*
 	else
 		my_addr = SAddr.sin_addr.s_addr;
+	*/
 
 	/*if we have a valid portrange try to use that*/
+/*
 	if (prefs.hex_dcc_port_first > 0)
 	{
 		SAddr.sin_port = 0;
@@ -1681,24 +1786,24 @@ dcc_listen_init (struct DCC *dcc, session *sess)
 			SAddr.sin_port = htons (prefs.hex_dcc_port_first + i);
 			i++;
 			/*printf("Trying to bind against port: %d\n",ntohs(SAddr.sin_port));*/
-			bindretval = bind (dcc->sok, (struct sockaddr *) &SAddr, sizeof (SAddr));
+/*			bindretval = bind (dcc->sok, (struct sockaddr *) &SAddr, sizeof (SAddr));
 		}
 
 		/* with a small port range, reUseAddr is needed */
-		len = 1;
+/*		len = 1;
 		setsockopt (dcc->sok, SOL_SOCKET, SO_REUSEADDR, (char *) &len, sizeof (len));
 
 	} else
 	{
 		/* try random port */
-		SAddr.sin_port = 0;
+/*		SAddr.sin_port = 0;
 		bindretval = bind (dcc->sok, (struct sockaddr *) &SAddr, sizeof (SAddr));
 	}
 
 	if (bindretval == -1)
 	{
 		/* failed to bind */
-		PrintText (sess, "Failed to bind to any address or port.\n");
+/*		PrintText (sess, "Failed to bind to any address or port.\n");
 		return FALSE;
 	}
 
@@ -1710,9 +1815,11 @@ dcc_listen_init (struct DCC *dcc, session *sess)
 	/*if we have a dcc_ip, we use that, so the remote client can connect*/
 	/*else we try to take an address from hex_dcc_ip*/
 	/*if something goes wrong we tell the client to connect to our LAN ip*/
-	dcc->addr = dcc_get_my_address ();
+	// FIXME
+	//dcc->addr = dcc_get_my_address ();
 
 	/*if nothing else worked we use the address we bound to*/
+	/*
 	if (dcc->addr == 0)
 	   dcc->addr = my_addr;
 
@@ -1721,8 +1828,9 @@ dcc_listen_init (struct DCC *dcc, session *sess)
 	set_nonblocking (dcc->sok);
 	listen (dcc->sok, 1);
 	set_blocking (dcc->sok);
+	*/
 
-	dcc->iotag = fe_input_add (dcc->sok, FIA_READ|FIA_EX, dcc_accept, dcc);
+//dcc->iotag = fe_input_add (dcc->sok, FIA_READ|FIA_EX, dcc_accept, dcc);
 
 	return TRUE;
 }
@@ -1892,9 +2000,9 @@ dcc_send (struct session *sess, char *to, char *filename, gint64 maxcps, int pas
 		else
 		{
 			g_snprintf (outbuf, sizeof (outbuf), (havespaces) ?
-					"DCC SEND \"%s\" %u %d %" G_GUINT64_FORMAT :
-					"DCC SEND %s %u %d %" G_GUINT64_FORMAT,
-					file_part (dcc->file), dcc->addr,
+					"DCC SEND \"%s\" %s %d %" G_GUINT64_FORMAT :
+					"DCC SEND %s %s %d %" G_GUINT64_FORMAT,
+			            file_part (dcc->file), dcc_get_dcc_ip (dcc->addr),
 					dcc->port, dcc->size);
 		}
 		sess->server->p_ctcp (sess->server, to, outbuf);
@@ -2320,8 +2428,8 @@ dcc_chat (struct session *sess, char *nick, int passive)
 						 dcc->port, dcc->pasvid);
 		} else
 		{
-			g_snprintf (outbuf, sizeof (outbuf), "DCC CHAT chat %u %d",
-						 dcc->addr, dcc->port);
+			g_snprintf (outbuf, sizeof (outbuf), "DCC CHAT chat %s %d",
+			            dcc_get_dcc_ip (dcc->addr), dcc->port);
 		}
 		dcc->serv->p_ctcp (dcc->serv, nick, outbuf);
 		EMIT_SIGNAL (XP_TE_DCCCHATOFFERING, sess, nick, NULL, NULL, NULL, 0);
@@ -2392,7 +2500,7 @@ dcc_deny_chat (void *ud)
 }
 
 static struct DCC *
-dcc_add_chat (session *sess, char *nick, int port, guint32 addr, int pasvid)
+dcc_add_chat (session *sess, char *nick, int port, struct addrinfo *addr, int pasvid)
 {
 	struct DCC *dcc;
 
@@ -2434,7 +2542,7 @@ dcc_add_chat (session *sess, char *nick, int port, guint32 addr, int pasvid)
 }
 
 static struct DCC *
-dcc_add_file (session *sess, char *file, guint64 size, int port, char *nick, guint32 addr, int pasvid)
+dcc_add_file (session *sess, char *file, guint64 size, int port, char *nick, struct addrinfo *addr, int pasvid)
 {
 	struct DCC *dcc;
 	char tbuf[512];
@@ -2507,6 +2615,42 @@ dcc_add_file (session *sess, char *file, guint64 size, int port, char *nick, gui
 }
 
 void
+dcc_parse_ip (char *addr_txt, struct addrinfo **addr, struct session *sess)
+{
+	int s;
+	struct addrinfo hints;
+
+	//if (*addr)
+	//freeaddrinfo (*addr);
+
+	//addr = NULL;
+
+	memset(&hints, 0, sizeof(struct addrinfo));
+	hints.ai_family = AF_UNSPEC;        /* Allow IPv4 or IPv6 */
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_flags = AI_NUMERICHOST;
+	hints.ai_protocol = IPPROTO_TCP;
+	hints.ai_canonname = NULL;
+	hints.ai_addr = NULL;
+	hints.ai_next = NULL;
+
+	PrintTextf (sess->server->front_session, "Parsing DCC address: %s\n", addr_txt);
+
+	s = getaddrinfo(addr_txt, NULL, &hints, addr);
+	if (s != 0) {
+		PrintTextf (sess->server->front_session, "getaddrinfo: %s\n", gai_strerror(s));
+		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(s));
+	}
+
+	if(!(*addr))
+		PrintText (sess->server->front_session, "Parsing DCC failed!\n");
+	else
+	{
+		PrintTextf (sess->server->front_session, "af %d, ap %d\n", (*addr)->ai_family, (*addr)->ai_protocol);
+	}
+}
+
+void
 handle_dcc (struct session *sess, char *nick, char *word[], char *word_eol[],
 				const message_tags_data *tags_data)
 {
@@ -2514,14 +2658,15 @@ handle_dcc (struct session *sess, char *nick, char *word[], char *word_eol[],
 	struct DCC *dcc;
 	char *type = word[5];
 	int port, pasvid = 0;
-	guint32 addr;
+	struct addrinfo *addr = NULL;
 	guint64 size;
 	int psend = 0;
 
 	if (!g_ascii_strcasecmp (type, "CHAT"))
 	{
 		port = atoi (word[8]);
-		addr = strtoul (word[7], NULL, 10);
+		//addr = strtoul (word[7], NULL, 10);
+		dcc_parse_ip (word[7], &addr, sess);
 
 		if (port == 0)
 			pasvid = atoi (word[9]);
@@ -2534,6 +2679,9 @@ handle_dcc (struct session *sess, char *nick, char *word[], char *word_eol[],
 		if (!addr /*|| (port < 1024 && port != 0)*/
 			|| port > 0xffff || (port == 0 && pasvid == 0))
 		{
+			if( addr )
+				; // FIXME free it!
+
 			dcc_malformed (sess, nick, word_eol[4] + 2);
 			return;
 		}
@@ -2543,11 +2691,17 @@ handle_dcc (struct session *sess, char *nick, char *word[], char *word_eol[],
 			dcc = find_dcc_from_id (pasvid, TYPE_CHATSEND);
 			if (dcc)
 			{
+				if (dcc->addr)
+					freeaddrinfo (dcc->addr);
+
 				dcc->addr = addr;
 				dcc->port = port;
 				dcc_connect (dcc);
 			} else
 			{
+				if( addr )
+					; // FIXME free it!
+
 				dcc_malformed (sess, nick, word_eol[4] + 2);
 			}
 			return;
@@ -2625,8 +2779,11 @@ handle_dcc (struct session *sess, char *nick, char *word[], char *word_eol[],
 		char *file = file_part (word[6]);
 
 		port = atoi (word[8]);
-		addr = strtoul (word[7], NULL, 10);
+		//addr = strtoul (word[7], NULL, 10);
+		dcc_parse_ip (word[7], &addr, sess);
 		size = g_ascii_strtoull (word[9], NULL, 10);
+
+		PrintTextf (sess->server->front_session, "2- af %d, ap %d\n", addr->ai_family, addr->ai_protocol);
 
 		if (port == 0) /* Passive dcc requested */
 			pasvid = atoi (word[10]);
@@ -2649,9 +2806,15 @@ handle_dcc (struct session *sess, char *nick, char *word[], char *word_eol[],
 		if (!addr || !size /*|| (port < 1024 && port != 0)*/
 			|| port > 0xffff || (port == 0 && pasvid == 0))
 		{
+			if( addr )
+				; // FIXME free it!
+
 			dcc_malformed (sess, nick, word_eol[4] + 2);
 			return;
 		}
+
+		//dcc_malformed (sess, nick, word_eol[4] + 2);
+		//return;
 
 		if (psend)
 		{
@@ -2662,11 +2825,17 @@ handle_dcc (struct session *sess, char *nick, char *word[], char *word_eol[],
 			dcc = find_dcc_from_id (pasvid, TYPE_SEND);
 			if (dcc)
 			{
+				if (dcc->addr)
+					freeaddrinfo (dcc->addr);
+
 				dcc->addr = addr;
 				dcc->port = port;
 				dcc_connect (dcc);
 			} else
 			{
+				if( addr )
+					; // FIXME free it!
+
 				dcc_malformed (sess, nick, word_eol[4] + 2);
 			}
 			return;

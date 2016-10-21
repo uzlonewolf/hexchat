@@ -51,6 +51,13 @@
 #define FILEPATH_LEN_MAX MAXPATHLEN
 #endif
 
+/* needed for INET6_ADDRSTRLEN */
+#ifdef WIN32                        /* for win32 */
+#include <Ws2ipdef.h>
+#else
+#include <netinet/in.h>
+#endif
+
 /* force a 32bit CMP.L */
 #define WORDL(c0, c1, c2, c3) (guint32)(c0 | (c1 << 8) | (c2 << 16) | (c3 << 24))
 
@@ -311,8 +318,8 @@ struct hexchatprefs
 	char hex_text_spell_langs[64];
 
 	/* these are the private variables */
-	guint32 local_ip;
-	guint32 dcc_ip;
+	char local_ip[INET6_ADDRSTRLEN];
+	char dcc_ip[INET6_ADDRSTRLEN];
 
 	unsigned int wait_on_exit;	/* wait for logs to be flushed to disk IF we're connected */
 

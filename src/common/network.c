@@ -54,12 +54,22 @@ net_set_socket_options (int sok)
 }
 
 char *
-net_ip (guint32 addr)
+net_ip (struct addrinfo *addr)
 {
+  //unsigned char buf[sizeof(struct in6_addr)];
+  static char out[INET6_ADDRSTRLEN];
+
+  if (!addr || !addr->ai_addr)
+    return NULL;
+
+  return inet_ntop(addr->ai_family, addr->ai_addr, out, INET6_ADDRSTRLEN);
+
+  /*
 	struct in_addr ia;
 
 	ia.s_addr = htonl (addr);
 	return inet_ntoa (ia);
+  */
 }
 
 void
